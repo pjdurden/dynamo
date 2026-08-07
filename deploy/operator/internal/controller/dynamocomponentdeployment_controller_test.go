@@ -169,11 +169,132 @@ func TestDCDRendererRejectsMissingOrStaleAutomaticCheckpointBinding(t *testing.T
 	), "not operator-managed")
 }
 
+func TestDCDRendererVerifiesSuppliedAutomaticFailoverIdentity(t *testing.T) {
+	ctx := context.Background()
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+	}
+	const workerHash = "workerhash"
+	checkpointID := checkpoint.DGDCheckpointID(
+		dgd.Namespace,
+		dgd.Name,
+		string(dgd.UID),
+		"worker",
+		workerHash,
+	)
+	checkpointName := "checkpoint-" + checkpointID
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-worker",
+			Namespace: dgd.Namespace,
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoComponent:  "worker",
+				commonconsts.KubeLabelDynamoWorkerHash: workerHash,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(dgd, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Experimental: &v1beta1.ExperimentalSpec{
+					Failover: &v1beta1.FailoverSpec{},
+					Checkpoint: &v1beta1.ComponentCheckpointConfig{
+						Enabled: true,
+						Identity: &v1beta1.DynamoCheckpointIdentity{
+							Model:                "Qwen/Qwen3-0.6B",
+							BackendFramework:     string(dynamo.BackendFrameworkSGLang),
+							DynamoVersion:        "1.2.3",
+							TensorParallelSize:   1,
+							PipelineParallelSize: 1,
+							Dtype:                "bf16",
+							MaxModelLen:          32768,
+							ExtraParameters: map[string]string{
+								"custom":       "preserved",
+								"dgdUID":       "user-value",
+								"component":    "user-value",
+								"checkpointID": "user-value",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	ckpt, err := checkpoint.ExpectedAutoCheckpoint(
+		scheme.Scheme,
+		dgd.Namespace,
+		checkpointID,
+		v1alpha1.DynamoCheckpointIdentity{
+			Model:                "Qwen/Qwen3-0.6B",
+			BackendFramework:     string(dynamo.BackendFrameworkVLLM),
+			DynamoVersion:        "1.2.3",
+			TensorParallelSize:   1,
+			PipelineParallelSize: 1,
+			Dtype:                "bf16",
+			MaxModelLen:          32768,
+			ExtraParameters: map[string]string{
+				"custom":       "preserved",
+				"dgdUID":       "dgd-uid",
+				"component":    "worker",
+				"checkpointID": checkpointID,
+			},
+		},
+		corev1.PodTemplateSpec{},
+		commonconsts.MainContainerName,
+		v1alpha1.CheckpointDeletionPolicyDelete,
+		nil,
+		dgd,
+	)
+	require.NoError(t, err)
+	renderer := newDCDWorkloadRenderer(
+		fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(dgd, ckpt).Build(),
+		nil,
+		nil,
+		nil,
+	)
+
+	require.NoError(t, (&componentWorkloadsReconciler{}).applyCheckpointStartupPolicy(
+		dcd,
+		&checkpoint.CheckpointInfo{
+			Enabled:        true,
+			Exists:         true,
+			CheckpointName: checkpointName,
+			Automatic:      true,
+			AutoBinding:    "checkpoint-binding",
+		},
+	))
+	require.NotNil(t, dcd.Spec.Experimental.Checkpoint.Identity)
+	require.NoError(t, renderer.verifyAutomaticFailoverCheckpoint(
+		ctx,
+		dcd,
+		&checkpoint.CheckpointInfo{CheckpointName: checkpointName},
+	))
+}
+
 func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilityBeforeSideEffects(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default", Generation: 7},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
 			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Multinode:     &v1beta1.MultinodeSpec{NodeCount: 2},
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: commonconsts.MainContainerName,
+						Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+							corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+						}},
+					}},
+				}},
 				Experimental: &v1beta1.ExperimentalSpec{
 					Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
 					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
@@ -213,7 +334,10 @@ func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilit
 	require.Equal(t, "InvalidCheckpointConfiguration", available.Reason)
 	require.Equal(t,
 		"Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
-			"Snapshot with active/passive failover is temporarily unsupported",
+			"Snapshot with active/passive failover requires an operator-managed automatic vLLM Worker checkpoint: "+
+			"checkpoint failover is only supported for an operator-generated DCD\n"+
+			"gpuMemoryService.mode must be IntraPod\n"+
+			"multinode/model-parallel worker topology is unsupported",
 		available.Message,
 	)
 	require.Zero(t, stored.Status.ObservedGeneration)

@@ -25,6 +25,7 @@ import (
 
 	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -166,7 +167,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		grovePathway:            grovePathway,
 		grovePathwayRequirement: grovePathwayRequirement,
 	}
-	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
+	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(dgd, field.NewPath("spec"), specOpts)...)
 	if v.requestVersionSource == runtimeVersionSourceV1Beta1 {
 		allErrs = append(allErrs, validateTwoShadowProfiles(dgd)...)
 	}
@@ -255,10 +256,11 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 
 // validateDynamoGraphDeploymentSpec validates spec. spec and fldPath must not be nil.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
-	spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	fldPath *field.Path,
 	opts dynamoGraphDeploymentSpecValidationOptions,
 ) field.ErrorList {
+	spec := &dgd.Spec
 	const validateInferencePoolAvailability = true
 
 	allErrs := field.ErrorList{}
@@ -275,11 +277,12 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	for i := range spec.Components {
 		component := &spec.Components[i]
 		componentPath := componentsPath.Index(i)
+		componentErrs := field.ErrorList{}
 
 		if opts.grovePathway {
 			combinedLength, detail := dgdComponentResourceNameLength(opts.dgdName, spec.Components, component)
 			if combinedLength > maxCombinedResourceNameLength {
-				allErrs = append(allErrs, field.Invalid(
+				componentErrs = append(componentErrs, field.Invalid(
 					componentPath.Child("name"),
 					component.ComponentName,
 					fmt.Sprintf(
@@ -298,14 +301,14 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		if gms != nil && effectiveGMSMode(gms.Mode) == nvidiacomv1beta1.GMSModeInterPod {
 			modePath := componentPath.Child("experimental", "gpuMemoryService", "mode")
 			if !opts.grovePathway {
-				allErrs = append(allErrs, field.Forbidden(modePath, opts.grovePathwayRequirement))
+				componentErrs = append(componentErrs, field.Forbidden(modePath, opts.grovePathwayRequirement))
 			}
 			if spec.BackendFramework != string(dynamo.BackendFrameworkVLLM) {
 				detected := spec.BackendFramework
 				if detected == "" {
 					detected = unsetValue
 				}
-				allErrs = append(allErrs, field.Invalid(
+				componentErrs = append(componentErrs, field.Invalid(
 					modePath,
 					gms.Mode,
 					fmt.Sprintf("the inter-pod GMS layout is currently supported only for vLLM (detected backend: %s)", detected),
@@ -314,14 +317,24 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		}
 
 		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
-		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
+		componentErrs = append(componentErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
-		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
+		componentErrs = append(componentErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,
 			componentPath,
 			opts.grovePathway,
 			validateInferencePoolAvailability,
 		)...)
+
+		// Keep backend resolution errors before existing component errors and compatibility errors after them.
+		backendErrs, compatibilityErrs := validateDGDComponentCheckpointCompatibility(
+			dgd,
+			component,
+			componentPath,
+		)
+		allErrs = append(allErrs, backendErrs...)
+		allErrs = append(allErrs, componentErrs...)
+		allErrs = append(allErrs, compatibilityErrs...)
 	}
 
 	if spec.Restart != nil {
@@ -402,6 +415,41 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	}
 
 	return allErrs
+}
+
+func validateDGDComponentCheckpointCompatibility(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	componentPath *field.Path,
+) (field.ErrorList, field.ErrorList) {
+	backendFramework := dynamo.BackendFramework(dgd.Spec.BackendFramework)
+
+	// Checkpoint failover requires the backend resolved for this component.
+	if checkpoint.HasCheckpointEnabledFailover(component) {
+		resolved, err := dynamo.BackendFrameworkForComponent(component, dgd)
+		if err != nil {
+			return field.ErrorList{field.Invalid(
+				componentPath,
+				component.ComponentName,
+				fmt.Sprintf("failed to determine backend framework: %v", err),
+			)}, nil
+		}
+		backendFramework = resolved
+	}
+
+	// Report checkpoint compatibility violations in stable policy order.
+	allErrs := field.ErrorList{}
+	for _, err := range checkpoint.ValidateCheckpointCompatibility(
+		component,
+		string(backendFramework),
+		checkpoint.CompatibilityContextDGDSource,
+	) {
+		allErrs = append(allErrs, field.Forbidden(
+			componentPath.Child("experimental", "checkpoint"),
+			err.Error(),
+		))
+	}
+	return nil, allErrs
 }
 
 // validateRestart validates restart. restart and fldPath must not be nil.
