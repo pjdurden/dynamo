@@ -265,7 +265,9 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 		checkpointName := checkpointInfo.CheckpointName
 		dcd.Spec.Experimental.Checkpoint.Enabled = true
 		dcd.Spec.Experimental.Checkpoint.CheckpointRef = &checkpointName
-		dcd.Spec.Experimental.Checkpoint.Identity = nil
+		if !dynamo.IsIntraPodFailoverEnabled(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+			dcd.Spec.Experimental.Checkpoint.Identity = nil
+		}
 		dcd.Spec.Experimental.Checkpoint.Job = nil
 		startupPolicy := checkpointInfo.StartupPolicy
 		if startupPolicy == "" {
