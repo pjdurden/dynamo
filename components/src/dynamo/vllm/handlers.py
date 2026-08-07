@@ -1114,6 +1114,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
         encode_worker_client: Optional[Client] = None,
+        engine_monitor: VllmEngineMonitor | None = None,
     ):
         self.runtime = runtime
         self.engine_client = engine
@@ -1122,7 +1123,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.fpm_relays: list | None = None
         self.generate_endpoint = generate_endpoint
         self.config = config
-        self.engine_monitor = VllmEngineMonitor(runtime, engine, shutdown_event)
+        self.engine_monitor = (
+            engine_monitor
+            if engine_monitor is not None
+            else VllmEngineMonitor(runtime, engine, shutdown_event)
+        )
         self.temp_dirs: list[tempfile.TemporaryDirectory] = []
         self.model_max_len = model_max_len
         self.model_config = model_config
@@ -2675,6 +2680,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def cleanup(self):
         """Clean up resources including temporary directories."""
+        self.engine_monitor.cancel()
         if self._custom_encoder is not None:
             # Run backend.close() on the actor thread, then stop it — executor
             # GC would only end the thread, never call close().
@@ -3078,36 +3084,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
-    def __init__(
-        self,
-        runtime,
-        config: Config,
-        engine,
-        default_sampling_params,
-        model_max_len: int | None = None,
-        model_config: ModelConfig | None = None,
-        enable_multimodal: bool = False,
-        generate_endpoint=None,
-        use_vllm_tokenizer: bool = False,
-        shutdown_event: asyncio.Event | None = None,
-        enable_frontend_decoding: bool = False,
-        encode_worker_client: Client | None = None,
-    ):
-        super().__init__(
-            runtime,
-            config,
-            engine,
-            default_sampling_params,
-            model_max_len=model_max_len,
-            model_config=model_config,
-            enable_multimodal=enable_multimodal,
-            generate_endpoint=generate_endpoint,
-            use_vllm_tokenizer=use_vllm_tokenizer,
-            shutdown_event=shutdown_event,
-            enable_frontend_decoding=enable_frontend_decoding,
-            encode_worker_client=encode_worker_client,
-        )
-
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
         request_id = context.id()
@@ -3554,6 +3530,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
         encode_worker_client: Client | None = None,
+        engine_monitor: VllmEngineMonitor | None = None,
     ):
         super().__init__(
             runtime,
@@ -3568,6 +3545,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             shutdown_event=shutdown_event,
             enable_frontend_decoding=enable_frontend_decoding,
             encode_worker_client=encode_worker_client,
+            engine_monitor=engine_monitor,
         )
 
         self._multimodal_request_processor.initialize_prefill_handoff()
