@@ -31,7 +31,7 @@ use crate::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::WORKER_TYPE_PREFILL,
     },
-    session_affinity::create_affinity_coordinator,
+    session_affinity::{SessionAffinityMode, create_affinity_coordinator},
 };
 
 impl PrefillRouter<DefaultWorkerSelector> {
@@ -88,6 +88,20 @@ where
         router_mode: RouterMode,
         session_affinity_ttl_secs: Option<u64>,
     ) -> Arc<Self> {
+        Self::disabled_with_selector_and_affinity_mode(
+            model_manager,
+            router_mode,
+            session_affinity_ttl_secs,
+            SessionAffinityMode::Hard,
+        )
+    }
+
+    pub(crate) fn disabled_with_selector_and_affinity_mode(
+        model_manager: Arc<ModelManager>,
+        router_mode: RouterMode,
+        session_affinity_ttl_secs: Option<u64>,
+        session_affinity_mode: SessionAffinityMode,
+    ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: std::sync::OnceLock::new(),
             decode_router: None,
@@ -98,6 +112,7 @@ where
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            session_affinity_mode,
             conditional_disagg_policy: make_conditional_disagg_policy(None),
             conditional_disagg_prefill_busy_threshold: None,
             conditional_disagg_decode_busy_threshold: None,
@@ -125,6 +140,41 @@ where
         is_eagle: bool,
         worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
     ) -> Arc<Self> {
+        Self::new_with_selector_factory_and_affinity_mode(
+            activation_rx,
+            model_manager,
+            router_mode,
+            kv_cache_block_size,
+            kv_router_config,
+            decode_router,
+            worker_selector_factory,
+            prefill_load_estimator,
+            session_affinity_ttl_secs,
+            SessionAffinityMode::Hard,
+            model_name,
+            namespace,
+            is_eagle,
+            worker_monitor,
+        )
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) fn new_with_selector_factory_and_affinity_mode(
+        activation_rx: oneshot::Receiver<Endpoint>,
+        model_manager: Arc<ModelManager>,
+        router_mode: RouterMode,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        decode_router: Option<Arc<KvRouter<Sel>>>,
+        worker_selector_factory: WorkerSelectorFactory<Sel>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        session_affinity_ttl_secs: Option<u64>,
+        session_affinity_mode: SessionAffinityMode,
+        model_name: String,
+        namespace: String,
+        is_eagle: bool,
+        worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
+    ) -> Arc<Self> {
         let prefill_router = std::sync::OnceLock::new();
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let conditional_disagg_policy = make_conditional_disagg_policy(kv_router_config.as_ref());
@@ -146,6 +196,7 @@ where
             cancel_token: cancel_token.clone(),
             router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            session_affinity_mode,
             conditional_disagg_policy,
             conditional_disagg_prefill_busy_threshold,
             conditional_disagg_decode_busy_threshold,
@@ -272,11 +323,14 @@ where
             .await?;
 
             // Wrap it in KvPushRouter
-            InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new_with_coordinator(
-                push_router,
-                kv_chooser,
-                affinity,
-            )))
+            InnerPrefillRouter::KvRouter(Arc::new(
+                KvPushRouter::new_with_coordinator_and_affinity_mode(
+                    push_router,
+                    kv_chooser,
+                    affinity,
+                    self.session_affinity_mode,
+                ),
+            ))
         } else {
             // Create client for simple router
             let client = endpoint.client().await?;

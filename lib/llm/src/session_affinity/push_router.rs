@@ -9,7 +9,7 @@ use dynamo_runtime::pipeline::{
 };
 
 use super::{
-    AffinityCoordinator, AffinityTarget, LlmResponse,
+    AffinityCoordinator, AffinityTarget, LlmResponse, SessionAffinityMode,
     coordinator::{affinity_id, invalid_argument},
     explicit_target,
 };
@@ -238,7 +238,7 @@ impl SessionAffinityPushRouter {
                 return Err(error);
             }
         };
-        let stream = operation.into_stream(target, stream)?;
+        let stream = operation.into_stream(target, stream, SessionAffinityMode::Hard)?;
         Self::record_target(tracker.as_deref(), target);
         Ok((metadata, stream))
     }
@@ -358,7 +358,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LlmResponse>, Error>
                 return Err(error);
             }
         };
-        let stream = operation.into_stream(target, stream)?;
+        let stream = operation.into_stream(target, stream, SessionAffinityMode::Hard)?;
         Self::record_target(tracker.as_deref(), target);
         Ok(stream)
     }

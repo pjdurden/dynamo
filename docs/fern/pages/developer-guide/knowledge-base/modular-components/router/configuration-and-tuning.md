@@ -121,12 +121,16 @@ a value from `1` through `31536000` to enable it, then send
 without the TTL option provides session identity but does not enable router affinity.
 
 The first successfully dispatched request binds the session ID to its selected
-worker and, when available, data-parallel rank. Later requests exact-dispatch to
-that target without transport fallback. Concurrent requests can share a binding.
-Active requests prevent expiry. When a request lease ends after EOF, early drop,
-error, or cancellation, the idle timer restarts. A missing bound worker or a
+worker and, when available, data-parallel rank. `--router-session-affinity-mode hard`
+is the default: later requests exact-dispatch to that target without invoking worker
+filters, scorers, or pickers. `soft` is supported only with KV routing: it keeps the
+bound worker as a preference, then runs normal eligibility and worker selection. The
+built-in picker takes a surviving preference; a custom picker can choose a different
+worker without rewriting the binding. Concurrent requests can share a binding. Active
+requests prevent expiry. When a request lease ends after EOF, early drop, error, or
+cancellation, the idle timer restarts. In hard mode, a missing bound worker or a
 non-cancellation selection, setup, dispatch, or target-validation failure invalidates
-the binding.
+the binding. In soft mode, the binding remains a preference until its idle timeout.
 
 The configured value is the idle timeout. It is independent of
 `--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity

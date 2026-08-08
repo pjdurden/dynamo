@@ -27,7 +27,8 @@ use crate::{
     },
     request_template::RequestTemplate,
     session_affinity::{
-        AffinityCoordinator, SessionAffinityPushRouter, create_affinity_coordinator,
+        AffinityCoordinator, SessionAffinityMode, SessionAffinityPushRouter,
+        create_affinity_coordinator,
     },
     types::{
         Annotated,
@@ -204,6 +205,7 @@ fn preprocessed_backend_engine<Sel>(
     model_manager: &Arc<crate::discovery::ModelManager>,
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
+    affinity_mode: SessionAffinityMode,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -247,8 +249,11 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(KvPushRouter::new_with_coordinator(
-                router, chooser, affinity,
+            Arc::new(KvPushRouter::new_with_coordinator_and_affinity_mode(
+                router,
+                chooser,
+                affinity,
+                affinity_mode,
             ))
         }
     };
@@ -267,6 +272,7 @@ pub async fn build_preprocessed_routing(
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
+    session_affinity_mode: SessionAffinityMode,
 ) -> anyhow::Result<PreprocessedRouting> {
     build_preprocessed_routing_with_selector(
         client,
@@ -278,6 +284,7 @@ pub async fn build_preprocessed_routing(
         encoder_chooser,
         enable_multimodal_cache_indexer,
         session_affinity_ttl_secs,
+        session_affinity_mode,
     )
     .await
 }
@@ -293,6 +300,7 @@ pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
+    session_affinity_mode: SessionAffinityMode,
 ) -> anyhow::Result<PreprocessedRouting<Sel>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -305,6 +313,9 @@ where
         model_manager.lora_enabled(),
         session_affinity_ttl_secs.is_some(),
     )?;
+    if session_affinity_mode == SessionAffinityMode::Soft && router_mode != RouterMode::KV {
+        anyhow::bail!("soft session affinity requires --router-mode=kv");
+    }
     let min_initial_workers = min_initial_workers_from_env()?;
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
 
@@ -348,10 +359,11 @@ where
     RouterRequestMetrics::from_component(client.endpoint.component());
 
     let prefill_router = prefill_chooser.unwrap_or_else(|| {
-        PrefillRouter::<Sel>::disabled_with_selector(
+        PrefillRouter::<Sel>::disabled_with_selector_and_affinity_mode(
             model_manager.clone(),
             router_mode,
             session_affinity_ttl_secs,
+            session_affinity_mode,
         )
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
@@ -366,6 +378,7 @@ where
         &model_manager,
         &endpoint_id,
         affinity,
+        session_affinity_mode,
     )?;
     Ok(PreprocessedRouting {
         backend_engine,

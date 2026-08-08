@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 use super::replica_sync::SessionAffinityUpdate;
 use super::{
     LlmResponse, MAX_SESSION_AFFINITY_ENTRIES, MAX_SESSION_AFFINITY_ID_BYTES,
-    MAX_SESSION_AFFINITY_TTL_SECS, replica_sync::ReplicaSyncRuntime,
+    MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode, replica_sync::ReplicaSyncRuntime,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -547,6 +547,7 @@ impl AffinityAcquire {
         self,
         selected_target: AffinityTarget,
         stream: ManyOut<LlmResponse>,
+        mode: SessionAffinityMode,
     ) -> Result<ManyOut<LlmResponse>, Error> {
         match self {
             Self::Initialize(initialization) => {
@@ -555,10 +556,13 @@ impl AffinityAcquire {
                 Ok(lease.into_stream(stream))
             }
             Self::Bound { target, mut lease } => {
-                if let Err(error) = validate_bound_target("session", target, Some(selected_target))
-                {
-                    lease.invalidate();
-                    return Err(error);
+                if mode == SessionAffinityMode::Hard {
+                    if let Err(error) =
+                        validate_bound_target("session", target, Some(selected_target))
+                    {
+                        lease.invalidate();
+                        return Err(error);
+                    }
                 }
                 lease.publish(target);
                 Ok(lease.into_stream(stream))

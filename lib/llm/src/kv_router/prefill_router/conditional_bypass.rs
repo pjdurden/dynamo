@@ -15,7 +15,7 @@ use crate::protocols::common::{
     preprocessor::RoutingHints,
     timing::RequestPhase,
 };
-use crate::session_affinity::AffinityTarget;
+use crate::session_affinity::{AffinityTarget, SessionAffinityMode};
 
 /// Conditional-disagg decision: which decode worker to pin the request to,
 /// plus diagnostic counts for logging.
@@ -146,8 +146,8 @@ where
                 return Ok(None);
             }
         };
-        let pinned_worker = match request_pinned_worker {
-            Some(worker) => Some(worker),
+        let (pinned_worker, preferred_worker) = match request_pinned_worker {
+            Some(worker) => (Some(worker), None),
             None => match decode_affinity_target {
                 Some(target) => {
                     let Some(dp_rank) = target
@@ -161,9 +161,14 @@ where
                         );
                         return Ok(None);
                     };
-                    Some(WorkerWithDpRank::new(target.worker_id, dp_rank))
+                    let worker = WorkerWithDpRank::new(target.worker_id, dp_rank);
+                    if self.session_affinity_mode == SessionAffinityMode::Hard {
+                        (Some(worker), None)
+                    } else {
+                        (None, Some(worker))
+                    }
                 }
-                None => None,
+                None => (None, None),
             },
         };
         let routing_constraints = req
@@ -173,7 +178,7 @@ where
             .unwrap_or_default();
 
         let outcome = decode_router
-            .find_best_match_details_without_admission(
+            .find_best_match_details_without_admission_with_preference(
                 Some(request_id),
                 routing_token_ids,
                 block_mm_infos,
@@ -187,6 +192,7 @@ where
                 session_id.clone(),
                 expected_output_tokens,
                 pinned_worker,
+                preferred_worker,
                 allowed_worker_ids,
                 routing_constraints,
             )

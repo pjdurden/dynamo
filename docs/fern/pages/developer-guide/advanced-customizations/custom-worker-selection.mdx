@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Custom Worker Selection
-subtitle: Build a Rust scorer and picker, then run them with the Dynamo frontend or EPP
+subtitle: Build Rust filters, scorers, and pickers, then run them with the Dynamo frontend or EPP
 ---
 
 **Experimental.** Build a Rust policy that scores eligible workers by active request count and picks the lowest score. Run it with `python3 -m dynamo.frontend` and a custom Endpoint Picker Provider (EPP) binary.
 
-Dynamo handles discovery, eligibility, queueing, reservations, accounting, and metrics. Your policy scores the eligible workers and selects one.
+Dynamo handles discovery, eligibility, queueing, reservations, accounting, and metrics. Your policy filters, scores, or picks eligible workers. This is a compile-time extension point: the image resolves one configured policy factory at startup, and the factory creates mutable policy state per worker set/routing partition.
 
 ## What You Build
 
@@ -15,16 +15,17 @@ Create these three crates next to a Dynamo source checkout:
 
 ```text
 acme-routing/
-├── policy/                  # scorer, picker, and provider
+├── policy/                  # filters, scorers, pickers, and provider
 ├── catalog/                 # registers policy types
 ├── epp/                     # custom EPP binary
 └── worker-selection.yaml    # chooses one configured policy instance
 ```
 
-The policy path is the same for both processes:
+The policy path is the same for both processes. Built-in eligibility (allowlists, taints, overload, and hard pins) runs before custom policy code.
 
 ```text
 eligible workers
+  -> WorkerFilter(s)
   -> LeastBusyScorer: cost = active_requests
   -> LowestCostPicker: choose smallest cost
   -> Dynamo reserves and routes to that worker
@@ -64,6 +65,15 @@ cargo add --path "$DYNAMO_DIR/deploy/inference-gateway/ext-proc" dynamo-ext-proc
 ```
 
 ## Write the Policy
+
+`WorkerFilter`, `WorkerScorer`, and `WorkerPicker` are independent extension points. You do not need to implement all three.
+
+| Goal | Compose the policy with |
+| --- | --- |
+| Exclude additional workers | Your `WorkerFilter`, `DefaultWorkerScorer`, and `DefaultWorkerPicker` |
+| Change only the cost model | Your `WorkerScorer` and `DefaultWorkerPicker` |
+| Change only the final choice | `DefaultWorkerScorer` and your `WorkerPicker` |
+| Change both | Your `WorkerScorer` implementations and your `WorkerPicker` |
 
 Replace `policy/src/lib.rs` with this code:
 
@@ -149,6 +159,41 @@ pub fn register(
 
 This policy accepts an empty YAML parameter map. Add and validate fields in `Parameters` when it needs settings.
 
+## Write a Worker Filter
+
+A filter runs once for each worker that passes built-in eligibility. Return `true` to keep it. To compose a filter-only policy, use `WorkerSelectionPolicy::new_with_filters` with Dynamo's defaults:
+
+```rust
+use dynamo_kv_router::{
+    DefaultWorkerPicker, DefaultWorkerScorer, KvRouterConfig, WorkerCandidate, WorkerFilter,
+    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
+};
+
+struct ExcludeWorker(u64);
+
+impl WorkerFilter for ExcludeWorker {
+    fn keep(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        candidate: &WorkerCandidate,
+    ) -> Result<bool, WorkerSelectionPolicyError> {
+        Ok(candidate.worker().worker_id != self.0)
+    }
+}
+
+fn filter_only_policy(config: &KvRouterConfig, worker_type: &'static str) -> WorkerSelectionPolicy {
+    WorkerSelectionPolicy::new_with_filters(
+        config.clone(),
+        worker_type,
+        vec![Box::new(ExcludeWorker(42))],
+        vec![Box::new(DefaultWorkerScorer::new(config.clone(), worker_type))],
+        Box::new(DefaultWorkerPicker::new(config.router_temperature)),
+    )
+}
+```
+
+If filters reject every built-in eligible worker, Dynamo returns unavailable rather than overload. A valid hard pin bypasses custom filters, scorers, and pickers after Dynamo validates it.
+
 Check the policy before composing it into a catalog:
 
 ```bash
@@ -172,7 +217,7 @@ pub fn register(
 }
 ```
 
-`least-busy` is the policy type. YAML selects a named instance of that type.
+`least-busy` is the policy type. YAML selects a named instance of that type. The catalog can link many policy crates and each factory creates policy state per routing partition.
 
 ## Configure the Instance
 
@@ -187,11 +232,24 @@ worker_selection:
       parameters: {}
 ```
 
-Set `DYN_ROUTER_WORKER_SELECTION_POLICY` to override `worker_selection.default`. Set it to `default`, or omit `worker_selection`, to use Dynamo's built-in selector.
+Set `DYN_ROUTER_WORKER_SELECTION_POLICY` to override `worker_selection.default`. The `default` is the process-wide configuration selection, not one shared mutable policy instance. Set it to `default`, or omit `worker_selection`, to use Dynamo's built-in selector.
+
+## Read Worker Signals
+
+Declare only the signal groups your components need with `required_worker_inputs`. Filters receive the union of all filter-requested groups; scorers receive the scorer/picker-input union. Dynamo materializes scorer and picker inputs only after filters keep a worker. Pickers receive only their declared columns in `WorkerInputView`.
+
+| Input group | Accessors |
+| --- | --- |
+| `WorkerInputs::CACHE` | `effective_overlap_blocks`, `device_overlap_blocks`, `host_overlap_blocks`, `disk_overlap_blocks`, `shared_beyond_device_blocks` |
+| `WorkerInputs::LOAD` | `raw_prefill_blocks`, `active_prefill_tokens`, `decode_cost_blocks`, `active_requests` |
+| `WorkerInputs::ROUTING` | `preferred_taint_multiplier` |
+| `WorkerInputs::NONE` | Worker identity; pickers also receive total scorer cost |
+
+The canonical public trait signatures, signals, and accessors are in [`lib/kv-router/src/scheduling/selector/policy.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/selector/policy.rs).
 
 ## Run With the Python Frontend
 
-The Python frontend links the catalog into `dynamo._core`. Add your catalog to the Python binding manifest in the checkout used to build the frontend image.
+The Python frontend links the catalog into `dynamo._core`. Custom worker selection requires KV routing through the HTTP frontend; `--interactive` and `--kserve-grpc-server` fail startup when a linked policy is configured. Add your catalog to the Python binding manifest in the checkout used to build the frontend image.
 
 Replace the catalog dependency. Keep the `dynamo-worker-selection-policy-catalog` alias; use your catalog package name.
 
@@ -250,12 +308,18 @@ Follow the [standalone EPP on-ramp](../../kubernetes/kv-aware-routing/vanilla-vl
 
 Linked policies require `DYN_EPP_MODE=standalone`. In `dynamo` mode, EPP delegates selection to the Dynamo runtime. The stock standalone `dynamo-ext-proc` binary uses Dynamo's default selector and rejects custom instances at startup.
 
+## Session Affinity
+
+Session affinity is a frontend feature, not an EPP selection-service feature. Set `--router-session-affinity-ttl-secs` to enable it. The default `--router-session-affinity-mode hard` exact-dispatches a valid bound worker after built-in eligibility and bypasses custom filters, scorers, and pickers.
+
+`--router-session-affinity-mode soft` requires `--router-mode kv`. It supplies the bound worker as `WorkerSelectionContext::preferred_worker()` and runs normal eligibility, filters, scorers, and picking. Dynamo's default picker chooses a surviving preference; a custom picker can spill to another survivor without rewriting the stored binding. The same behavior applies to conditional-disaggregation's advisory selection.
+
 ## Policy Contract
 
 - Return finite scorer costs. Dynamo rejects non-finite contributions and totals.
 - Return a row from `WorkerInputView::candidates()`. Dynamo validates the index before reservation and accounting.
-- Declare every signal a scorer or picker reads with `required_worker_inputs`. Request only the signals you use.
+- Declare every signal a filter, scorer, or picker reads with `required_worker_inputs`. Request only the signals you use.
 - Treat candidate row order as unspecified. Break ties with a worker identity or another explicit signal if tie behavior matters.
-- Keep blocking I/O and panics out of `score` and `pick`. Both run in Dynamo's scheduler queue actor.
+- Keep blocking I/O and panics out of `keep`, `score`, and `pick`. All run in Dynamo's scheduler queue actor.
 
 For the built-in cost model, see [Routing Concepts](../knowledge-base/modular-components/router/routing-concepts.md). For the full standalone EPP deployment, see [Using GAIE with vanilla vLLM](../../kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx).

@@ -5,13 +5,34 @@ mod coordinator;
 mod push_router;
 mod replica_sync;
 
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
 use dynamo_runtime::{component::Client, pipeline::Error};
+use serde::{Deserialize, Serialize};
 
 pub(crate) use coordinator::{AffinityAcquire, affinity_id};
 pub use coordinator::{AffinityCoordinator, AffinityTarget, explicit_target};
 pub use push_router::SessionAffinityPushRouter;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionAffinityMode {
+    #[default]
+    Hard,
+    Soft,
+}
+
+impl FromStr for SessionAffinityMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "hard" => Ok(Self::Hard),
+            "soft" => Ok(Self::Soft),
+            _ => Err("session affinity mode must be 'hard' or 'soft'".to_string()),
+        }
+    }
+}
 
 pub const MAX_SESSION_AFFINITY_TTL_SECS: u64 = 31_536_000;
 pub const MAX_SESSION_AFFINITY_ENTRIES: usize = 65_536;

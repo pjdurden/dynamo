@@ -795,6 +795,7 @@ impl SelectionCore {
             session_id,
             expected_output_tokens,
             pinned_worker,
+            preferred_worker: None,
             allowed_worker_ids,
             routing_constraints,
             shared_cache_hits: None,

@@ -12,8 +12,8 @@ use dynamo_runtime::{
 use futures::{StreamExt, stream};
 
 use super::{
-    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id,
-    coordinator::ReplicaApplyOutcome, explicit_target,
+    AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, SessionAffinityMode,
+    affinity_id, coordinator::ReplicaApplyOutcome, explicit_target,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -331,12 +331,47 @@ async fn session_affinity_committed_binding_survives_cancelled_stream_until_ttl(
     let coordinator = coordinator();
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
     let mut stream = operation
-        .into_stream(target(7, Some(0)), cancelled_response_stream())
+        .into_stream(
+            target(7, Some(0)),
+            cancelled_response_stream(),
+            SessionAffinityMode::Hard,
+        )
         .unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
     assert!(stream.next().await.is_none());
 
     assert_binding_expires_after_refreshed_ttl(&coordinator).await;
+}
+
+#[tokio::test]
+async fn soft_session_affinity_keeps_the_existing_binding_after_a_picker_spills() {
+    let coordinator = coordinator();
+    let initial = coordinator.acquire(&session_id(), None).await.unwrap();
+    drop(
+        initial
+            .into_stream(
+                target(7, Some(0)),
+                response_stream(1),
+                SessionAffinityMode::Hard,
+            )
+            .unwrap(),
+    );
+
+    let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
+    drop(
+        continuation
+            .into_stream(
+                target(8, Some(0)),
+                response_stream(1),
+                SessionAffinityMode::Soft,
+            )
+            .unwrap(),
+    );
+
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(target(7, Some(0)))
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -598,7 +633,11 @@ async fn session_affinity_publishes_after_dispatch_and_lease_completion() {
     let selected_target = target(7, Some(0));
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
     let stream = operation
-        .into_stream(selected_target, response_stream(1))
+        .into_stream(
+            selected_target,
+            response_stream(1),
+            SessionAffinityMode::Hard,
+        )
         .unwrap();
 
     let after_dispatch = updates.recv().await.unwrap();
@@ -621,7 +660,11 @@ async fn session_affinity_completion_restores_expired_remote_binding() {
     let replicated_target = target(7, Some(0));
     let operation = origin.acquire(&session_id(), None).await.unwrap();
     let stream = operation
-        .into_stream(replicated_target, response_stream(1))
+        .into_stream(
+            replicated_target,
+            response_stream(1),
+            SessionAffinityMode::Hard,
+        )
         .unwrap();
 
     let after_dispatch = updates.recv().await.unwrap();

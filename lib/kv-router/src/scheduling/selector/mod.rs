@@ -9,9 +9,9 @@ mod policy;
 
 pub use default::{DefaultWorkerPicker, DefaultWorkerScorer, DefaultWorkerSelector};
 pub use policy::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerInputView, WorkerInputs,
-    WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy,
+    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
+    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerRoutingInput, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy,
 };
 
 use default::{pick_default_worker, selection_weights};
@@ -91,6 +91,7 @@ impl<'a> WorkerSelectionInput<'a> {
                     .router_config_override
                     .as_ref()
                     .and_then(|config| config.router_temperature),
+                preferred_worker: request.preferred_worker,
             },
         }
     }
@@ -224,7 +225,7 @@ fn log_selection<C: WorkerConfigLike>(
     request: &SchedulingRequest,
     worker: WorkerWithDpRank,
     worker_type: &'static str,
-    cost: f64,
+    cost: Option<f64>,
     effective_overlap_blocks: f64,
 ) {
     let request_id = request.mode.request_id().unwrap_or("-");
@@ -246,11 +247,10 @@ fn log_selection<C: WorkerConfigLike>(
     if request.pinned_worker == Some(worker) {
         tracing::info!(
             request_id,
-            "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}",
+            "Selected pinned worker: worker_type={}, worker_id={} dp_rank={:?}, effective cached blocks: {:.2}",
             worker_type,
             worker.worker_id,
             worker.dp_rank,
-            cost,
             effective_overlap_blocks,
         );
     } else if worker_type == "decode" {
@@ -260,7 +260,7 @@ fn log_selection<C: WorkerConfigLike>(
             worker_id = worker.worker_id,
             worker_type = %worker_type,
             dp_rank = ?worker.dp_rank,
-            logit = cost,
+            logit = ?cost,
             host_pinned_blocks,
             disk_blocks,
             "Selected worker"
@@ -275,7 +275,7 @@ fn log_selection<C: WorkerConfigLike>(
             worker_id = worker.worker_id,
             worker_type = %worker_type,
             dp_rank = ?worker.dp_rank,
-            logit = cost,
+            logit = ?cost,
             effective_cached_blocks = effective_overlap_blocks,
             host_pinned_blocks,
             disk_blocks,
@@ -310,6 +310,16 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
             }
             Err(_) => return Err(KvSchedulerError::NoEndpoints),
         }
+        let result = selection_result(request, worker, block_size);
+        log_selection(
+            workers,
+            request,
+            worker,
+            worker_type,
+            None,
+            result.effective_overlap_blocks,
+        );
+        return Ok(result);
     }
 
     let weights = selection_weights(kv_router_config, request);
@@ -317,7 +327,10 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         WorkerSelectionPolicyStateRef::Default(_) => {
             WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
         }
-        WorkerSelectionPolicyStateRef::Custom(state) => RefCell::borrow(state).worker_inputs,
+        WorkerSelectionPolicyStateRef::Custom(state) => {
+            let state = RefCell::borrow(state);
+            state.filter_inputs | state.scorer_picker_inputs
+        }
     };
     let input =
         WorkerSelectionInput::new(workers, request, eligibility, block_size, weights, inputs);
@@ -331,7 +344,8 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         WorkerSelectionPolicyStateRef::Custom(state) => {
             let mut state = state.borrow_mut();
-            collect_custom_candidates(&mut state, &input, workers, request, eligibility)?;
+            let has_eligible_worker =
+                collect_custom_candidates(&mut state, &input, workers, request, eligibility)?;
             let CustomWorkerSelectionState {
                 picker,
                 picker_inputs,
@@ -342,6 +356,9 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 ..
             } = &mut *state;
             if candidates.is_empty() {
+                if has_eligible_worker {
+                    return Err(KvSchedulerError::AllEligibleWorkersFiltered);
+                }
                 None
             } else {
                 debug_assert!(
@@ -396,7 +413,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         request,
         worker,
         worker_type,
-        cost,
+        Some(cost),
         result.effective_overlap_blocks,
     );
     Ok(result)
@@ -460,6 +477,7 @@ mod test_support {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,

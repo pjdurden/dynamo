@@ -94,6 +94,14 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS`
 </ParamField>
 
+<ParamField path="--router-session-affinity-mode" type="string" default="hard">
+  `hard` routes a bound session directly to its worker. `soft` requires `--router-mode kv`; it prefers the bound worker while still running worker filters, scorers, and pickers.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>hard</Badge> <Badge intent="note" minimal>soft</Badge></span>
+
+  Environment variable: `DYN_ROUTER_SESSION_AFFINITY_MODE`
+</ParamField>
+
 <ParamField path="--decode-fallback / --no-decode-fallback" type="boolean" default="false">
   Fall back to aggregated mode when prefill workers are unavailable.
 

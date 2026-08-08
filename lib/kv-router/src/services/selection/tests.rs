@@ -27,8 +27,8 @@ use crate::scheduling::WorkerSelectionPolicyError;
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
 use crate::scheduling::selector::{
-    WorkerCandidate, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy,
+    WorkerCandidate, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy,
 };
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
@@ -111,6 +111,18 @@ impl WorkerPicker for InvalidRowPicker {
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         Ok(input.candidates().len())
+    }
+}
+
+struct RejectAllFilter;
+
+impl WorkerFilter for RejectAllFilter {
+    fn keep(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        _candidate: &WorkerCandidate,
+    ) -> Result<bool, WorkerSelectionPolicyError> {
+        Ok(false)
     }
 }
 
@@ -415,6 +427,33 @@ async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
             .unwrap()
             .contains("candidate row")
     );
+    assert_eq!(active_requests(app, 1).await, 0);
+}
+
+#[tokio::test]
+async fn worker_selection_filter_returns_unavailable_without_booking() {
+    let app = native_policy_app(|config, worker_type, _partition| {
+        WorkerSelectionPolicy::new_with_filters(
+            config.clone(),
+            worker_type,
+            vec![Box::new(RejectAllFilter)],
+            Vec::new(),
+            Box::new(LowestCostPicker),
+        )
+    })
+    .await;
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let rejected = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"filtered"}"#,
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(active_requests(app, 1).await, 0);
 }
 

@@ -729,6 +729,7 @@ where
                 session_id,
                 expected_output_tokens,
                 pinned_worker,
+                None,
                 allowed_worker_ids,
                 routing_constraints,
                 FindBestMatchAdmission::WithAdmission {
@@ -763,6 +764,47 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchAdvisoryOutcome> {
+        self.find_best_match_details_without_admission_with_preference(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            return_routing_hashes,
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_id,
+            expected_output_tokens,
+            pinned_worker,
+            None,
+            allowed_worker_ids,
+            routing_constraints,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn find_best_match_details_without_admission_with_preference(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_id: Option<String>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        preferred_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<FindBestMatchAdvisoryOutcome> {
         match self
             .find_best_match_details_with_policy_class_inner(
                 context_id,
@@ -779,6 +821,7 @@ where
                 session_id,
                 expected_output_tokens,
                 pinned_worker,
+                preferred_worker,
                 allowed_worker_ids,
                 routing_constraints,
                 FindBestMatchAdmission::WithoutAdmission,
@@ -809,6 +852,7 @@ where
         session_id: Option<String>,
         expected_output_tokens: Option<u32>,
         pinned_worker: Option<WorkerWithDpRank>,
+        preferred_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
@@ -927,6 +971,7 @@ where
             session_id,
             expected_output_tokens,
             pinned_worker,
+            preferred_worker,
             allowed_worker_ids,
             routing_constraints,
             shared_cache_hits,

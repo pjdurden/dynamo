@@ -397,14 +397,6 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         scorer.required_worker_inputs(),
         WorkerInputs::ALL | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
     );
-    if let Some(worker) = eligibility.pinned_worker() {
-        let row = input.row(worker, None, WorkerInputs::ALL);
-        return Some((
-            worker,
-            scorer.worker_logit(&input.context, &row, "Pinned formula"),
-        ));
-    }
-
     let temperature = input
         .context
         .router_temperature_override
@@ -434,8 +426,12 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
             let mut best_worker = None;
             let mut best_cost = f64::INFINITY;
             let mut tie_count = 0;
+            let mut preferred = None;
             for worker in candidates {
                 let cost = get_candidate_score(worker);
+                if input.context.preferred_worker == Some(worker) {
+                    preferred = Some((worker, cost));
+                }
                 if cost < best_cost {
                     best_worker = Some(worker);
                     best_cost = cost;
@@ -447,13 +443,22 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
                     }
                 }
             }
-            return best_worker.map(|worker| (worker, best_cost));
+            return preferred.or_else(|| best_worker.map(|worker| (worker, best_cost)));
         }
 
-        let entries = candidates
+        let entries: Vec<_> = candidates
             .into_iter()
             .map(|worker| (worker, get_candidate_score(worker)))
             .collect();
+        if let Some(preferred) = input.context.preferred_worker {
+            if let Some(entry) = entries
+                .iter()
+                .copied()
+                .find(|(worker, _)| *worker == preferred)
+            {
+                return Some(entry);
+            }
+        }
         return Some(softmax_sample_entries(entries, temperature, rng.f64()));
     }
 
@@ -461,8 +466,12 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
         let mut best_worker = None;
         let mut best_cost = f64::INFINITY;
         let mut tie_count = 0;
+        let mut preferred = None;
         eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
             let cost = get_score(worker, config);
+            if input.context.preferred_worker == Some(worker) {
+                preferred = Some((worker, cost));
+            }
             if cost < best_cost {
                 best_worker = Some(worker);
                 best_cost = cost;
@@ -474,7 +483,7 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
                 }
             }
         });
-        return best_worker.map(|worker| (worker, best_cost));
+        return preferred.or_else(|| best_worker.map(|worker| (worker, best_cost)));
     }
 
     let mut scratch = picker.softmax_scratch.lock();
@@ -489,6 +498,15 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
             entries,
             probabilities,
         } = &mut *scratch;
+        if let Some(preferred) = input.context.preferred_worker {
+            if let Some(entry) = entries
+                .iter()
+                .copied()
+                .find(|(worker, _)| *worker == preferred)
+            {
+                return Some(entry);
+            }
+        }
         let row = softmax_sample_index(
             entries,
             |(_, cost)| *cost,
@@ -521,6 +539,14 @@ impl WorkerPicker for DefaultWorkerPicker {
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         let candidates = input.candidates();
+        if let Some(preferred) = context.preferred_worker() {
+            if let Some(row) = candidates
+                .iter()
+                .position(|candidate| candidate.worker == preferred)
+            {
+                return Ok(row);
+            }
+        }
         let temperature = context
             .router_temperature_override
             .unwrap_or(self.default_temperature);
@@ -707,6 +733,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
@@ -983,6 +1010,41 @@ mod tests {
     }
 
     #[test]
+    fn default_picker_uses_surviving_soft_affinity_preference() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let preferred = WorkerWithDpRank::from_worker_id(0);
+        let workers = HashMap::from([
+            (preferred.worker_id, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let mut request = base_request(16);
+        request.preferred_worker = Some(preferred);
+        request.worker_loads.insert(
+            preferred,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 100,
+                ..Default::default()
+            },
+        );
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+
+        assert_eq!(
+            selector
+                .select_worker(&workers, &request, request.eligibility(), 16)
+                .unwrap()
+                .worker,
+            preferred
+        );
+    }
+
+    #[test]
     fn test_required_taints_return_no_endpoints_when_no_worker_matches() {
         let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
         let workers = HashMap::from([(
@@ -1012,6 +1074,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
                 required_taints: HashSet::from(["mdc-b".to_string()]),
@@ -1063,6 +1126,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
                 required_taints: HashSet::from(["mdc-b".to_string()]),
@@ -1132,6 +1196,7 @@ mod tests {
                 session_id: None,
                 expected_output_tokens: None,
                 pinned_worker: None,
+                preferred_worker: None,
                 allowed_worker_ids: None,
                 routing_constraints: crate::protocols::RoutingConstraints {
                     required_taints: HashSet::from([required_taint.clone()]),
@@ -1199,6 +1264,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
                 required_taints: HashSet::new(),
@@ -1262,6 +1328,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints {
                 required_taints: HashSet::new(),
@@ -1341,6 +1408,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: Some(shared_hits),
@@ -1411,6 +1479,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
@@ -1685,6 +1754,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
@@ -1740,6 +1810,7 @@ mod tests {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
+            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,

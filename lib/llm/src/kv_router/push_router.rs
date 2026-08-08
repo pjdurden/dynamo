@@ -20,7 +20,10 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
+    kv_router::{
+        KvRouter, metrics::RouterRequestMetrics, prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
+        scheduler::DefaultWorkerSelector,
+    },
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -29,7 +32,8 @@ use crate::{
         timing::{RequestPhase, RoutingData},
     },
     session_affinity::{
-        AffinityAcquire, AffinityCoordinator, AffinityTarget, affinity_id, explicit_target,
+        AffinityAcquire, AffinityCoordinator, AffinityTarget, SessionAffinityMode, affinity_id,
+        explicit_target,
     },
 };
 
@@ -48,13 +52,31 @@ fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
 }
 
-fn invalidate_on_non_cancellation(operation: &mut Option<AffinityAcquire>, error: &Error) {
-    if is_cancelled(error) {
+fn invalidate_hard_affinity_on_non_cancellation(
+    mode: SessionAffinityMode,
+    operation: &mut Option<AffinityAcquire>,
+    error: &Error,
+) {
+    if mode == SessionAffinityMode::Soft || is_cancelled(error) {
         return;
     }
     if let Some(operation) = operation.take() {
         operation.invalidate();
     }
+}
+
+fn affinity_explicit_target(
+    request: &SingleIn<PreprocessedRequest>,
+    phase: RequestPhase,
+    mode: SessionAffinityMode,
+) -> Result<Option<AffinityTarget>, Error> {
+    if mode == SessionAffinityMode::Soft
+        && phase == RequestPhase::Decode
+        && request.has_annotation(BYPASS_REMOTE_PREFILL_ANNOTATION)
+    {
+        return Ok(None);
+    }
+    explicit_target(request, phase)
 }
 
 fn monitor_response_stream<Sel>(
@@ -116,6 +138,7 @@ where
     pub chooser: Arc<KvRouter<Sel>>,
     request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
+    affinity_mode: SessionAffinityMode,
 }
 
 impl<Sel> KvPushRouter<Sel>
@@ -127,17 +150,37 @@ where
         chooser: Arc<KvRouter<Sel>>,
         session_affinity_ttl: Option<Duration>,
     ) -> Result<Self, Error> {
+        Self::new_with_affinity_mode(
+            inner,
+            chooser,
+            session_affinity_ttl,
+            SessionAffinityMode::Hard,
+        )
+    }
+
+    pub fn new_with_affinity_mode(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        chooser: Arc<KvRouter<Sel>>,
+        session_affinity_ttl: Option<Duration>,
+        affinity_mode: SessionAffinityMode,
+    ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
             .map(AffinityCoordinator::new)
             .transpose()?;
 
-        Ok(Self::new_with_coordinator(inner, chooser, affinity))
+        Ok(Self::new_with_coordinator_and_affinity_mode(
+            inner,
+            chooser,
+            affinity,
+            affinity_mode,
+        ))
     }
 
-    pub(crate) fn new_with_coordinator(
+    pub(crate) fn new_with_coordinator_and_affinity_mode(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter<Sel>>,
         affinity: Option<AffinityCoordinator>,
+        affinity_mode: SessionAffinityMode,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
@@ -150,6 +193,7 @@ where
             chooser,
             request_metrics,
             affinity,
+            affinity_mode,
         }
     }
 
@@ -158,6 +202,9 @@ where
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
     ) -> Result<Option<WorkerWithDpRank>, Error> {
+        if self.affinity_mode == SessionAffinityMode::Soft {
+            return Ok(None);
+        }
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok(None);
         };
@@ -192,7 +239,12 @@ where
                 phase,
                 is_query_only,
                 SelectionOptions {
-                    affinity_worker,
+                    pinned_affinity_worker: (self.affinity_mode == SessionAffinityMode::Hard)
+                        .then_some(affinity_worker)
+                        .flatten(),
+                    preferred_worker: (self.affinity_mode == SessionAffinityMode::Soft)
+                        .then_some(affinity_worker)
+                        .flatten(),
                     policy_class,
                     session_id,
                 },
@@ -222,7 +274,7 @@ where
                 None,
             ));
         };
-        let explicit = explicit_target(request, phase)?;
+        let explicit = affinity_explicit_target(request, phase, self.affinity_mode)?;
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;
             let worker = target.and_then(affinity_worker);
@@ -240,7 +292,11 @@ where
         match self.select_request(request, phase, false, worker).await {
             Ok(selection) => Ok((selection, Some(operation))),
             Err(error) if is_cancelled(&error) => Err(error),
-            Err(_) if operation.target().is_some() && explicit.is_none() => {
+            Err(_)
+                if self.affinity_mode == SessionAffinityMode::Hard
+                    && operation.target().is_some()
+                    && explicit.is_none() =>
+            {
                 operation.invalidate();
                 let retry = affinity
                     .acquire_with_context(&session_id, None, request_context.as_ref())
@@ -258,7 +314,9 @@ where
                 }
             }
             Err(error) => {
-                operation.invalidate();
+                if self.affinity_mode == SessionAffinityMode::Hard {
+                    operation.invalidate();
+                }
                 Err(error)
             }
         }
@@ -475,7 +533,11 @@ where
         {
             Ok(guard) => guard,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_hard_affinity_on_non_cancellation(
+                    self.affinity_mode,
+                    &mut operation,
+                    &error,
+                );
                 return Err(error);
             }
         };
@@ -487,7 +549,11 @@ where
             Ok(metadata) => metadata,
             Err(error) => {
                 guard.abort().await;
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_hard_affinity_on_non_cancellation(
+                    self.affinity_mode,
+                    &mut operation,
+                    &error,
+                );
                 return Err(error);
             }
         };
@@ -498,14 +564,21 @@ where
         {
             Ok(stream) => stream,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_hard_affinity_on_non_cancellation(
+                    self.affinity_mode,
+                    &mut operation,
+                    &error,
+                );
                 return Err(error);
             }
         };
         let Some(operation) = operation else {
             return Ok((metadata, stream));
         };
-        Ok((metadata, operation.into_stream(selected_target, stream)?))
+        Ok((
+            metadata,
+            operation.into_stream(selected_target, stream, self.affinity_mode)?,
+        ))
     }
 }
 
@@ -597,7 +670,11 @@ where
         let guard = match self.track_selection(&request, &mut selection, false).await {
             Ok(guard) => guard,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_hard_affinity_on_non_cancellation(
+                    self.affinity_mode,
+                    &mut operation,
+                    &error,
+                );
                 return Err(error);
             }
         };
@@ -612,12 +689,16 @@ where
         {
             Ok(stream) => stream,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                invalidate_hard_affinity_on_non_cancellation(
+                    self.affinity_mode,
+                    &mut operation,
+                    &error,
+                );
                 return Err(error);
             }
         };
         match operation {
-            Some(operation) => operation.into_stream(selected_target, stream),
+            Some(operation) => operation.into_stream(selected_target, stream, self.affinity_mode),
             None => Ok(stream),
         }
     }
@@ -732,6 +813,39 @@ mod tests {
             .output_options(Default::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn soft_conditional_disagg_decode_pin_is_not_an_affinity_override() {
+        let mut request = request();
+        let routing = request.routing_mut();
+        routing.decode_worker_id = Some(8);
+        routing.dp_rank = Some(0);
+        request
+            .annotations
+            .push(BYPASS_REMOTE_PREFILL_ANNOTATION.to_string());
+
+        assert_eq!(
+            affinity_explicit_target(
+                &Context::new(request.clone()),
+                RequestPhase::Decode,
+                SessionAffinityMode::Soft
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            affinity_explicit_target(
+                &Context::new(request),
+                RequestPhase::Decode,
+                SessionAffinityMode::Hard
+            )
+            .unwrap(),
+            Some(AffinityTarget {
+                worker_id: 8,
+                dp_rank: Some(0),
+            })
+        );
     }
 
     #[test]
@@ -1036,7 +1150,11 @@ mod tests {
 
         let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
         let cancellation = cancellation::cancelled_error("cancelled-after-selection-request");
-        invalidate_on_non_cancellation(&mut operation, &cancellation);
+        invalidate_hard_affinity_on_non_cancellation(
+            SessionAffinityMode::Hard,
+            &mut operation,
+            &cancellation,
+        );
         assert!(operation.is_some());
         drop(operation);
         assert_eq!(
@@ -1046,9 +1164,32 @@ mod tests {
 
         let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
         let failure = anyhow::anyhow!("dispatch failed");
-        invalidate_on_non_cancellation(&mut operation, &failure);
+        invalidate_hard_affinity_on_non_cancellation(
+            SessionAffinityMode::Hard,
+            &mut operation,
+            &failure,
+        );
         assert!(operation.is_none());
         assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
+
+        let initializer = affinity.acquire(&session_id, None).await.unwrap();
+        let AffinityAcquire::Initialize(initializer) = initializer else {
+            panic!("binding must be reinitialized after hard invalidation");
+        };
+        drop(initializer.commit(original_target).unwrap());
+
+        let mut operation = Some(affinity.acquire(&session_id, None).await.unwrap());
+        invalidate_hard_affinity_on_non_cancellation(
+            SessionAffinityMode::Soft,
+            &mut operation,
+            &failure,
+        );
+        assert!(operation.is_some());
+        drop(operation);
+        assert_eq!(
+            affinity.query_target(&session_id, None).unwrap(),
+            Some(original_target)
+        );
 
         drop(router);
         runtime.shutdown();
