@@ -37,6 +37,11 @@ const BASE_ENV: [(&str, Option<&str>); 3] = [
     (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
     (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, None),
 ];
+const PEEK_ENABLED_ENV: [(&str, Option<&str>); 3] = [
+    (DYN_ENABLE_ANTHROPIC_API, Some("1")),
+    (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
+    (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, Some("500")),
+];
 
 fn backend_error<T>(error_type: ErrorType, message: &str) -> Annotated<T> {
     Annotated {
@@ -68,7 +73,7 @@ async fn assert_openai_400(response: reqwest::Response, message: &str) {
 #[tokio::test]
 #[serial]
 async fn completions_backend_validation_is_400_for_unary_and_streaming() {
-    temp_env::async_with_vars(BASE_ENV, async {
+    temp_env::async_with_vars(PEEK_ENABLED_ENV, async {
         let max_tokens_message = "max_tokens must be less than 2147483647";
         let logprobs_message = "Dynamo's SGLang backend does not currently support logprobs >= 1";
         let scripts: Vec<CompletionScript> = [
