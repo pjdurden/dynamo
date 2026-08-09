@@ -225,7 +225,8 @@ pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent
 fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     // Keep the two overload cases apart. A single overloaded worker can be
     // retried elsewhere; a pool with no free worker cannot, and migrating it
-    // would just bounce the request around. Both remain HTTP 529 to the client.
+    // would just bounce the request around. A filter rejection is unavailable,
+    // not overload, and becomes HTTP 503.
     let (error_type, overloaded) = match error {
         scheduling::KvSchedulerError::PinnedWorkerOverloaded { .. } => {
             (ErrorType::WorkerOverloaded, true)

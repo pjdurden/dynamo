@@ -253,18 +253,20 @@ fn log_selection<C: WorkerConfigLike>(
             effective_overlap_blocks,
         );
     } else if worker_type == "decode" {
+        let cost = cost.expect("non-pinned worker selection always computes a cost");
         tracing::info!(
             router_mode = "kv",
             request_id,
             worker_id = worker.worker_id,
             worker_type = %worker_type,
             dp_rank = ?worker.dp_rank,
-            logit = ?cost,
+            logit = cost,
             host_pinned_blocks,
             disk_blocks,
             "Selected worker"
         );
     } else {
+        let cost = cost.expect("non-pinned worker selection always computes a cost");
         let total_kv_blocks = workers
             .get(&worker.worker_id)
             .and_then(WorkerConfigLike::total_kv_blocks);
@@ -274,7 +276,7 @@ fn log_selection<C: WorkerConfigLike>(
             worker_id = worker.worker_id,
             worker_type = %worker_type,
             dp_rank = ?worker.dp_rank,
-            logit = ?cost,
+            logit = cost,
             effective_cached_blocks = effective_overlap_blocks,
             host_pinned_blocks,
             disk_blocks,

@@ -53,6 +53,10 @@ impl WorkerInputs {
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
+
+    fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
 }
 
 impl BitOr for WorkerInputs {
@@ -180,6 +184,41 @@ impl WorkerCandidate {
         self.inputs
             .contains(WorkerInputs::ROUTING)
             .then_some(&self.routing)
+    }
+
+    fn with_inputs_from(&self, additional: &Self, inputs: WorkerInputs) -> Self {
+        debug_assert_eq!(self.worker, additional.worker);
+        Self {
+            worker: self.worker,
+            inputs,
+            cache: if inputs.contains(WorkerInputs::CACHE) {
+                if self.inputs.contains(WorkerInputs::CACHE) {
+                    self.cache
+                } else {
+                    additional.cache
+                }
+            } else {
+                WorkerCacheInput::default()
+            },
+            load: if inputs.contains(WorkerInputs::LOAD) {
+                if self.inputs.contains(WorkerInputs::LOAD) {
+                    self.load
+                } else {
+                    additional.load
+                }
+            } else {
+                WorkerLoadInput::default()
+            },
+            routing: if inputs.contains(WorkerInputs::ROUTING) {
+                if self.inputs.contains(WorkerInputs::ROUTING) {
+                    self.routing
+                } else {
+                    additional.routing
+                }
+            } else {
+                WorkerRoutingInput::default()
+            },
+        }
     }
 }
 
@@ -372,8 +411,8 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
     let mut error = None;
     eligibility.any_eligible_worker_rank(workers, |worker, config| {
         has_eligible_worker = true;
-        if !filters.is_empty() {
-            let filter_candidate = input.row(
+        let filter_candidate = (!filters.is_empty()).then(|| {
+            input.row(
                 worker,
                 filter_inputs
                     .contains(WorkerInputs::ROUTING)
@@ -384,9 +423,11 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
                     })
                     .flatten(),
                 *filter_inputs,
-            );
+            )
+        });
+        if let Some(filter_candidate) = filter_candidate.as_ref() {
             for filter in filters.iter_mut() {
-                match filter.keep(&input.context, &filter_candidate) {
+                match filter.keep(&input.context, filter_candidate) {
                     Ok(true) => {}
                     Ok(false) => return false,
                     Err(policy_error) => {
@@ -397,18 +438,36 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
             }
         }
 
-        let candidate = input.row(
-            worker,
-            scorer_picker_inputs
-                .contains(WorkerInputs::ROUTING)
-                .then(|| {
-                    request
-                        .routing_constraints
-                        .preferred_taint_multiplier(config.taints())
-                })
-                .flatten(),
-            *scorer_picker_inputs,
-        );
+        let candidate = match filter_candidate {
+            Some(filter_candidate) => {
+                let additional_inputs = scorer_picker_inputs.without(*filter_inputs);
+                let additional = input.row(
+                    worker,
+                    additional_inputs
+                        .contains(WorkerInputs::ROUTING)
+                        .then(|| {
+                            request
+                                .routing_constraints
+                                .preferred_taint_multiplier(config.taints())
+                        })
+                        .flatten(),
+                    additional_inputs,
+                );
+                filter_candidate.with_inputs_from(&additional, *scorer_picker_inputs)
+            }
+            None => input.row(
+                worker,
+                scorer_picker_inputs
+                    .contains(WorkerInputs::ROUTING)
+                    .then(|| {
+                        request
+                            .routing_constraints
+                            .preferred_taint_multiplier(config.taints())
+                    })
+                    .flatten(),
+                *scorer_picker_inputs,
+            ),
+        };
         let mut cost = 0.0;
         for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
             let contribution = match scorer.score(&input.context, &candidate) {
