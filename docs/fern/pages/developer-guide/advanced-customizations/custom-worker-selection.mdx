@@ -308,12 +308,6 @@ Follow the [standalone EPP on-ramp](../../kubernetes/kv-aware-routing/vanilla-vl
 
 Linked policies require `DYN_EPP_MODE=standalone`. In `dynamo` mode, EPP delegates selection to the Dynamo runtime. The stock standalone `dynamo-ext-proc` binary uses Dynamo's default selector and rejects custom instances at startup.
 
-## Session Affinity
-
-Session affinity is a frontend feature, not an EPP selection-service feature. Set `--router-session-affinity-ttl-secs` to enable it. The default `--router-session-affinity-mode hard` exact-dispatches a valid bound worker after built-in eligibility and bypasses custom filters, scorers, and pickers.
-
-`--router-session-affinity-mode soft` requires `--router-mode kv`. It supplies the bound worker as `WorkerSelectionContext::preferred_worker()` and runs normal eligibility, filters, scorers, and picking. Dynamo's default picker chooses a surviving preference; a custom picker can spill to another survivor without rewriting the stored binding. The same behavior applies to conditional-disaggregation's advisory selection.
-
 ## Policy Contract
 
 - Return finite scorer costs. Dynamo rejects non-finite contributions and totals.

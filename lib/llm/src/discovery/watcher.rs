@@ -1770,7 +1770,7 @@ where
                 // decode-only speculative hash mode.
                 let prefill_enable_eagle = false;
 
-                PrefillRouter::new_with_selector_factory_and_affinity_mode(
+                PrefillRouter::new_with_selector_factory(
                     rx,
                     self.manager.clone(),
                     router_config.router_mode,
@@ -1780,7 +1780,6 @@ where
                     self.worker_selector_factory.clone(),
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
-                    router_config.session_affinity_mode,
                     model_name.clone(),
                     namespace.clone(),
                     prefill_enable_eagle,
@@ -1822,7 +1821,6 @@ where
                         encoder_chooser.clone(),
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
-                        router_config.session_affinity_mode,
                     )
                     .await
                     .context("build_preprocessed_routing")?,

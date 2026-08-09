@@ -35,7 +35,7 @@ use crate::{
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
     },
-    session_affinity::{AffinityCoordinator, AffinityTarget, SessionAffinityMode},
+    session_affinity::{AffinityCoordinator, AffinityTarget},
 };
 
 mod activation;
@@ -178,7 +178,6 @@ where
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
-    session_affinity_mode: SessionAffinityMode,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
     /// Resolved once at construction: dedicated threshold if set, otherwise
     /// `router_queue_threshold`. `None` means the prefill-load condition is disabled.

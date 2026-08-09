@@ -1865,14 +1865,13 @@ impl KvRouter {
     /// Note: Worker type for Prometheus metrics is inferred from the endpoint name/component
     /// (contains "prefill") or by `router_track_active_blocks` being disabled.
     #[new]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, session_affinity_mode="hard"))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None))]
     fn new(
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
         aic_perf_config: Option<&AicPerfConfig>,
         session_affinity_ttl_secs: Option<u64>,
-        session_affinity_mode: &str,
     ) -> PyResult<Self> {
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
@@ -1888,7 +1887,6 @@ impl KvRouter {
                 "worker-selection instance {instance:?} is configured, but python -m dynamo.router does not support linked worker-selection policies; use python -m dynamo.frontend or a custom EPP binary"
             )));
         }
-        let session_affinity_mode = session_affinity_mode.parse().map_err(PyValueError::new_err)?;
         let prefill_load_estimator = aic_perf_config
             .map(|config| {
                 Python::with_gil(|py| {
@@ -1941,11 +1939,10 @@ impl KvRouter {
             )
             .await?;
 
-            let kv_push_router = RsKvPushRouter::new_with_affinity_mode(
+            let kv_push_router = RsKvPushRouter::new(
                 push_router,
                 kv_router,
                 session_affinity_ttl_secs.map(Duration::from_secs),
-                session_affinity_mode,
             )
             .map_err(to_pyerr)?;
 

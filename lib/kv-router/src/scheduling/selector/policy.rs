@@ -22,7 +22,6 @@ pub struct WorkerSelectionContext<'a> {
     pub(super) weights: LogitWeights,
     pub(super) min_active_prefill_tokens: usize,
     pub(super) router_temperature_override: Option<f64>,
-    pub(super) preferred_worker: Option<WorkerWithDpRank>,
 }
 
 pub struct WorkerCandidate {
@@ -157,10 +156,6 @@ impl WorkerSelectionContext<'_> {
 
     pub fn router_temperature_override(&self) -> Option<f64> {
         self.router_temperature_override
-    }
-
-    pub fn preferred_worker(&self) -> Option<WorkerWithDpRank> {
-        self.preferred_worker
     }
 }
 
@@ -724,48 +719,5 @@ mod tests {
             policy.select_worker(&workers, &request, request.eligibility(), 16),
             Err(KvSchedulerError::PinnedWorkerNotAllowed { worker_id: 0 })
         ));
-    }
-
-    #[test]
-    fn custom_picker_can_override_soft_affinity_preference() {
-        struct ChooseOtherWorker;
-
-        impl WorkerPicker for ChooseOtherWorker {
-            fn pick(
-                &mut self,
-                context: &WorkerSelectionContext<'_>,
-                input: WorkerInputView<'_>,
-            ) -> Result<usize, WorkerSelectionPolicyError> {
-                let preferred = context.preferred_worker().expect("soft preference");
-                Ok(input
-                    .candidates()
-                    .iter()
-                    .position(|candidate| candidate.worker() != preferred)
-                    .expect("non-preferred candidate"))
-            }
-        }
-
-        let preferred = WorkerWithDpRank::from_worker_id(0);
-        let other = WorkerWithDpRank::from_worker_id(1);
-        let workers = HashMap::from([
-            (preferred.worker_id, TaintedWorkerConfig::default()),
-            (other.worker_id, TaintedWorkerConfig::default()),
-        ]);
-        let mut request = base_request(16);
-        request.preferred_worker = Some(preferred);
-        let policy = WorkerSelectionPolicy::new(
-            KvRouterConfig::default(),
-            "test",
-            Vec::new(),
-            Box::new(ChooseOtherWorker),
-        );
-
-        assert_eq!(
-            policy
-                .select_worker(&workers, &request, request.eligibility(), 16)
-                .unwrap()
-                .worker,
-            other
-        );
     }
 }

@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
     local_model::LocalModel, model_card::ModelDeploymentCard,
-    session_affinity::SessionAffinityMode,
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 
@@ -53,8 +52,6 @@ pub struct RouterConfig {
     pub enforce_disagg: bool,
     #[serde(default)]
     pub session_affinity_ttl_secs: Option<u64>,
-    #[serde(default)]
-    pub session_affinity_mode: SessionAffinityMode,
 }
 
 impl RouterConfig {
@@ -65,7 +62,6 @@ impl RouterConfig {
             load_threshold_config: LoadThresholdConfig::default(),
             enforce_disagg: false,
             session_affinity_ttl_secs: None,
-            session_affinity_mode: SessionAffinityMode::Hard,
         }
     }
 
@@ -84,11 +80,6 @@ impl RouterConfig {
 
     pub fn with_session_affinity_ttl_secs(mut self, ttl_secs: u64) -> Self {
         self.session_affinity_ttl_secs = Some(ttl_secs);
-        self
-    }
-
-    pub fn with_session_affinity_mode(mut self, mode: SessionAffinityMode) -> Self {
-        self.session_affinity_mode = mode;
         self
     }
 }

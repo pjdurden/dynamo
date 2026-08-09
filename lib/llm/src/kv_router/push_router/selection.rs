@@ -51,8 +51,7 @@ impl<'a> RoutingRequestParts<'a> {
 }
 
 pub(super) struct SelectionOptions {
-    pub(super) pinned_affinity_worker: Option<WorkerWithDpRank>,
-    pub(super) preferred_worker: Option<WorkerWithDpRank>,
+    pub(super) affinity_worker: Option<WorkerWithDpRank>,
     pub(super) policy_class: Option<String>,
     pub(super) session_id: Option<String>,
 }
@@ -71,7 +70,6 @@ struct BestMatchArgs<'a> {
     session_id: Option<String>,
     expected_output_tokens: Option<u32>,
     pinned_worker: Option<WorkerWithDpRank>,
-    preferred_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
 }
@@ -98,7 +96,6 @@ where
                 args.session_id,
                 args.expected_output_tokens,
                 args.pinned_worker,
-                args.preferred_worker,
                 args.allowed_worker_ids,
                 args.routing_constraints,
                 FindBestMatchAdmission::WithAdmission {
@@ -184,13 +181,11 @@ where
         let return_routing_hashes =
             !is_query_only && self.chooser.indexer().records_routing_decisions();
         let SelectionOptions {
-            pinned_affinity_worker,
-            preferred_worker,
+            affinity_worker,
             policy_class,
             session_id,
         } = options;
-        let affinity_pin =
-            pinned_affinity_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
+        let affinity_pin = affinity_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
         let Some((pinned_worker_id, requested_dp_rank)) =
             merge_affinity_pin(explicit_pin, affinity_pin)
         else {
@@ -210,7 +205,6 @@ where
                     session_id,
                     expected_output_tokens,
                     pinned_worker: None,
-                    preferred_worker,
                     allowed_worker_ids,
                     routing_constraints: routing_constraints.clone(),
                 })
@@ -283,7 +277,6 @@ where
             session_id,
             expected_output_tokens,
             pinned_worker: Some(pinned_worker),
-            preferred_worker: None,
             allowed_worker_ids,
             routing_constraints,
         })

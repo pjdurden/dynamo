@@ -242,7 +242,6 @@ pub struct ScheduleRequest {
     pub lora_name: Option<String>,
     pub expected_output_tokens: Option<u32>,
     pub pinned_worker: Option<WorkerWithDpRank>,
-    pub preferred_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     pub routing_constraints: RoutingConstraints,
     pub router_config_override: Option<RouterConfigOverride>,
@@ -269,7 +268,6 @@ pub struct SchedulingRequest {
 
     // Routing constraints and request-level config.
     pub pinned_worker: Option<WorkerWithDpRank>,
-    pub preferred_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     pub routing_constraints: RoutingConstraints,
     pub router_config_override: Option<RouterConfigOverride>,
@@ -440,7 +438,6 @@ mod tests {
             lora_name: None,
             expected_output_tokens: None,
             pinned_worker: None,
-            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
             router_config_override: None,

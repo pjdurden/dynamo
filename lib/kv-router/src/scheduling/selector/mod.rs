@@ -91,7 +91,6 @@ impl<'a> WorkerSelectionInput<'a> {
                     .router_config_override
                     .as_ref()
                     .and_then(|config| config.router_temperature),
-                preferred_worker: request.preferred_worker,
             },
         }
     }
@@ -477,7 +476,6 @@ mod test_support {
             session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
-            preferred_worker: None,
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,

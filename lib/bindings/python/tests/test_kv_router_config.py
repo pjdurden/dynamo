@@ -3,7 +3,7 @@
 
 import pytest
 
-from dynamo.llm import KvRouterConfig, RouterConfig, RouterMode
+from dynamo.llm import KvRouterConfig
 
 
 def test_removed_router_options_cannot_shift_positional_arguments() -> None:
@@ -25,10 +25,3 @@ def test_decode_active_request_weight_defaults_to_zero_and_validates() -> None:
     for invalid in [-1.0, float("nan"), float("inf")]:
         with pytest.raises(ValueError, match="decode_active_request_weight"):
             KvRouterConfig(decode_active_request_weight=invalid)
-
-
-def test_soft_session_affinity_requires_kv_router_mode() -> None:
-    with pytest.raises(ValueError, match="requires RouterMode.KV"):
-        RouterConfig(RouterMode.RoundRobin, session_affinity_mode="soft")
-
-    RouterConfig(RouterMode.KV, session_affinity_mode="soft")
